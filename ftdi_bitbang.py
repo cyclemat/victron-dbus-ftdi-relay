@@ -16,7 +16,9 @@ import os
 from collections import namedtuple
 
 FTDI_VID = 0x0403
-DEFAULT_PIDS = (0x6001, 0x6010, 0x6011, 0x6014, 0x6015)
+# Nur FT245R/FT232R. Andere FTDI-Typen (z. B. FT231X im VE.Direct-USB-Kabel)
+# werden nie automatisch angefasst; bei Bedarf per product_ids ergaenzen.
+DEFAULT_PIDS = (0x6001,)
 
 # FTDI-Vendor-Requests (wie libftdi)
 REQ_OUT = 0x40
@@ -93,13 +95,14 @@ def _read(path, name, default=None):
 
 
 def find_devices(pids=DEFAULT_PIDS, sysfs="/sys/bus/usb/devices"):
-    """Alle angeschlossenen FTDI-Geraete mit passender Product-ID."""
+    """Alle angeschlossenen FTDI-Geraete mit passender Product-ID
+    (pids=None: alle FTDI-Geraete, egal welche Product-ID)."""
     out = []
     for path in glob.glob(os.path.join(sysfs, "*")):
         try:
             vid = int(_read(path, "idVendor"), 16)
             pid = int(_read(path, "idProduct"), 16)
-            if vid != FTDI_VID or pid not in pids:
+            if vid != FTDI_VID or (pids is not None and pid not in pids):
                 continue
             busnum = int(_read(path, "busnum"))
             devnum = int(_read(path, "devnum"))

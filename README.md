@@ -15,13 +15,22 @@ Der Dienst braucht kein pip und keine Zusatzbibliotheken. Der FTDI-Chip wird per
 ```sh
 scp dbus-ftdi-relay.tar.gz root@<gx-ip>:/data/
 cd /data && tar xzf dbus-ftdi-relay.tar.gz && cd dbus-ftdi-relay
-cp config.example.ini config.ini
-
-python3 dbus_ftdi_relay.py --list      # Seriennummer des Boards ablesen
-vi config.ini                          # serial = <Seriennummer> eintragen
-python3 dbus_ftdi_relay.py --test      # Relais 1–8 klicken nacheinander
-sh install.sh                          # Dienst + udev-Regel einrichten
+sh install.sh
 ```
+
+`install.sh` startet automatisch das Setup, solange noch kein Board eingetragen ist. Das Setup läuft in vier Schritten ab:
+
+1. Es listet alle FTDI-Geräte mit Seriennummer, Chip-Typ und USB-Port. Geräte, die gerade ein Venus-Dienst nutzt (z. B. `vedirect-interface`), sind markiert.
+2. Du wählst das Relaisboard per Nummer aus. Fremde Chip-Typen oder belegte Geräte werden erst nach der ausdrücklichen Eingabe `ja` angefasst.
+3. Es fragt, ob alle Relais aus sind. Daraus erkennt es, ob das Board invertiert schaltet. Dann lässt es Relais 1 kurz anziehen, und du bestätigst das.
+4. Nur nach deiner Bestätigung schreibt es Seriennummer, `invert` und bei Bedarf `product_ids` in die `config.ini`. Kommentare und alle anderen Einträge bleiben dabei erhalten.
+
+Später, etwa nach einem Board-Tausch, startest du das Setup jederzeit erneut mit `python3 dbus_ftdi_relay.py --setup`. Ein laufender Dienst wird dafür kurz angehalten, danach aktualisiert das Setup die udev-Regel und startet den Dienst neu.
+
+Weitere Befehle:
+
+- `python3 dbus_ftdi_relay.py --list`: alle FTDI-Geräte anzeigen.
+- `python3 dbus_ftdi_relay.py --test`: alle Relais nacheinander schalten. Den Dienst vorher mit `svc -d` stoppen.
 
 **Log:** `tail -F /var/log/dbus-ftdi-relay/current | tai64nlocal`
 
@@ -29,7 +38,7 @@ sh install.sh                          # Dienst + udev-Regel einrichten
 
 **Entfernen:** `sh uninstall.sh`
 
-Klicken beim Test alle Relais gleichzeitig, wenn sie aus sein sollten, ist das Board invertiert. Dann `invert = true` setzen.
+Die Seriennummer ist Pflicht, denn ohne sie startet der Dienst nicht. So fasst er nie ein anderes FTDI-Gerät wie ein VE.Direct-USB-Kabel an. Automatisch berücksichtigt werden nur FT245R/FT232R (Produkt-ID 6001).
 
 ## Wichtig: serial-starter
 

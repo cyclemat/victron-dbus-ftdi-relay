@@ -87,10 +87,13 @@ class Board:
         return self.dev is not None
 
     def find(self):
+        """Board per Seriennummer finden. Ohne Seriennummer nur, wenn genau
+        ein passendes FTDI-Geraet da ist (nur fuer --test erlaubt)."""
         devs = fb.find_devices(self.cfg.pids)
         if self.cfg.serial:
             devs = [d for d in devs if d.serial == self.cfg.serial]
-        return devs[0] if devs else None
+            return devs[0] if devs else None
+        return devs[0] if len(devs) == 1 else None
 
     def _hw(self, logical):
         return (logical ^ 0xFF) & 0xFF if self.cfg.invert else logical & 0xFF
@@ -341,13 +344,20 @@ class RelayService:
 # ------------------------------------------------------------------------ CLI
 
 def cmd_list(pids):
-    devs = fb.find_devices(pids)
+    """Zeigt ALLE FTDI-Geraete; * = wird vom Dienst beruecksichtigt."""
+    devs = fb.find_devices(None)
     if not devs:
-        print("Kein FTDI-Geraet gefunden.")
+        print("Kein FTDI-Geraet (Hersteller-ID 0403) gefunden.")
         return 1
-    print("%-12s %-6s %-10s %-10s %s" % ("Seriennr.", "PID", "USB-Port", "Treiber", "Produkt"))
+    print("  %-12s %-9s %-10s %-10s %s" % ("Seriennr.", "VID:PID", "USB-Port", "Treiber", "Produkt"))
     for d in devs:
-        print("%-12s %04x   %-10s %-10s %s" % (d.serial or "-", d.pid, d.sysname, d.driver, d.product))
+        mark = "*" if d.pid in pids else " "
+        print("%s %-12s 0403:%04x %-10s %-10s %s" % (mark, d.serial or "-", d.pid, d.sysname,
+                                                    d.driver, d.product))
+    if any(d.pid not in pids for d in devs):
+        print("\nOhne * = andere Product-ID, wird nicht angefasst. Nur wenn eines davon")
+        print("sicher dein Relaisboard ist: seine ID in config.ini unter product_ids")
+        print("ergaenzen (product_ids = 6001, <ID des Boards>) und serial= setzen.")
     return 0
 
 
@@ -355,7 +365,10 @@ def cmd_test(cfg):
     board = Board(cfg)
     info = board.find()
     if info is None:
-        print("Kein passendes FTDI-Board gefunden.")
+        if not cfg.serial and len(fb.find_devices(cfg.pids)) > 1:
+            print("Mehrere FTDI-Geraete gefunden. Bitte serial= in config.ini setzen (--list).")
+        else:
+            print("Kein passendes FTDI-Board gefunden.")
         return 1
     print("Teste %s (%s). Der Dienst muss gestoppt sein!" % (info.serial or "-", info.sysname))
     board.connect(info, 0)
@@ -371,6 +384,164 @@ def cmd_test(cfg):
         board.write(0)
         board.close()
     print("Fertig, alle Relais aus.")
+    return 0
+
+
+# ---------------------------------------------------------------------- Setup
+
+SERVICE_DIR = "/service/dbus-ftdi-relay"
+
+
+def _tty_of(info, sysfs="/sys/bus/usb/devices"):
+    import glob
+    hits = glob.glob(os.path.join(sysfs, info.sysname, info.sysname + ":1.0", "ttyUSB*"))
+    return os.path.basename(hits[0]) if hits else None
+
+
+def _venus_users(tty, service_root="/service"):
+    """Venus-Dienste, die serial-starter fuer dieses tty gestartet hat."""
+    import glob
+    if not tty:
+        return []
+    return [os.path.basename(p).rsplit(".", 1)[0]
+            for p in glob.glob(os.path.join(service_root, "*." + tty))]
+
+
+def update_config(path, values, example=None):
+    """Setzt Schluessel in [general], Kommentare und Reihenfolge bleiben erhalten."""
+    if not os.path.exists(path):
+        import shutil
+        shutil.copy(example or os.path.join(HERE, "config.example.ini"), path)
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+
+    def section_at(i):
+        sec = None
+        for line in lines[:i + 1]:
+            st = line.strip()
+            if st.startswith("[") and st.endswith("]"):
+                sec = st[1:-1].strip().lower()
+        return sec
+
+    key_re = re.compile(r"^\s*(#\s*)?([A-Za-z_]+)\s*=")
+
+    def find(key, want_comment):
+        hits = []
+        for i, line in enumerate(lines):
+            m = key_re.match(line)
+            if (m and m.group(2) == key and bool(m.group(1)) == want_comment
+                    and section_at(i) == "general"):
+                hits.append(i)
+        return hits
+
+    for key, value in values.items():
+        new = "%s = %s" % (key, value)
+        active = find(key, False)
+        commented = find(key, True)
+        if active:
+            lines[active[0]] = new
+        elif commented:
+            lines[commented[0]] = new
+        else:
+            hdr = next((i for i, l in enumerate(lines) if l.strip().lower() == "[general]"), None)
+            if hdr is None:
+                lines[:0] = ["[general]", new, ""]
+            else:
+                lines.insert(hdr + 1, new)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def _ask(prompt):
+    try:
+        return input(prompt).strip().lower()
+    except EOFError:
+        return "q"
+
+
+def _svc(action):
+    if os.path.exists(SERVICE_DIR):
+        os.system("svc %s %s 2>/dev/null" % (action, SERVICE_DIR))
+        return True
+    return False
+
+
+def cmd_setup(config_path):
+    """Board auswaehlen, per Klick bestaetigen, Konfiguration schreiben."""
+    devs = fb.find_devices(None)
+    if not devs:
+        print("Kein FTDI-Geraet gefunden. Board eingesteckt?")
+        return 1
+    print("Gefundene FTDI-Geraete:\n")
+    rows = []
+    for i, d in enumerate(devs, 1):
+        tty = _tty_of(d)
+        users = _venus_users(tty)
+        note = []
+        if d.pid not in fb.DEFAULT_PIDS:
+            note.append("anderer Chip-Typ")
+        if users:
+            note.append("in Benutzung durch: " + ", ".join(users))
+        rows.append((d, tty, users))
+        print("  [%d] Seriennr. %-10s 0403:%04x  Port %-8s %-20s %s" % (
+            i, d.serial or "-", d.pid, d.sysname, d.product[:20],
+            ("<- " + "; ".join(note)) if note else ""))
+    choice = _ask("\nWelches ist das Relaisboard? Nummer eingeben (q = Abbruch): ")
+    if not choice.isdigit() or not 1 <= int(choice) <= len(rows):
+        print("Abgebrochen, nichts geaendert.")
+        return 1
+    info, tty, users = rows[int(choice) - 1]
+    if not info.serial:
+        print("Dieses Geraet hat keine Seriennummer, automatische Zuordnung nicht moeglich.")
+        return 1
+    if info.pid not in fb.DEFAULT_PIDS or users:
+        print("\nACHTUNG: Der Test schaltet den Chip in den Bitbang-Modus. Ist das NICHT das")
+        print("Relaisboard (z. B. ein VE.Direct-Kabel), funktioniert es danach erst nach")
+        print("erneutem Einstecken wieder.")
+        if _ask("Wirklich dieses Geraet testen? 'ja' eintippen: ") != "ja":
+            print("Abgebrochen, nichts geaendert.")
+            return 1
+
+    stopped = _svc("-d")
+    if stopped:
+        time.sleep(1.5)
+    dev = fb.FtdiBitbang(info)
+    try:
+        dev.open()
+        dev.set_bitbang()
+        dev.write(0x00)
+        time.sleep(0.3)
+        invert = not _ask("\nSind jetzt ALLE Relais aus (keine Relais-LED an)? [j/n] ").startswith("j")
+        off = 0xFF if invert else 0x00
+        dev.write(off)
+        time.sleep(0.3)
+        print("Schalte Relais 1 fuer 1,5 s ein ...")
+        dev.write(off ^ 0x01)
+        time.sleep(1.5)
+        dev.write(off)
+        ok = _ask("Hat Relais 1 eben angezogen? [j/n] ").startswith("j")
+    except OSError as err:
+        print("USB-Fehler: %s" % err)
+        ok = False
+    finally:
+        dev.close()
+        if stopped:
+            _svc("-u")
+    if not ok:
+        print("Nicht bestaetigt, config.ini bleibt unveraendert.")
+        return 1
+
+    values = {"serial": info.serial, "invert": "true" if invert else "false"}
+    if info.pid not in fb.DEFAULT_PIDS:
+        values["product_ids"] = "6001, %04x" % info.pid
+    update_config(config_path, values)
+    print("\nconfig.ini aktualisiert: %s" % ", ".join("%s = %s" % kv for kv in values.items()))
+    if os.path.exists(SERVICE_DIR):
+        os.system("sh %s 2>/dev/null" % os.path.join(HERE, "boot.sh"))  # udev-Regel
+        _svc("-t")
+        print("Dienst neu gestartet.")
+    else:
+        print("Naechster Schritt: sh %s" % os.path.join(HERE, "install.sh"))
     return 0
 
 
@@ -403,12 +574,20 @@ def main():
     ap = argparse.ArgumentParser(description="FTDI-USB-Relaisboard fuer Venus OS")
     ap.add_argument("-c", "--config", default=os.path.join(HERE, "config.ini"))
     ap.add_argument("--list", action="store_true", help="FTDI-Geraete auflisten")
+    ap.add_argument("--setup", action="store_true",
+                    help="Board auswaehlen, testen und in config.ini eintragen")
     ap.add_argument("--test", action="store_true", help="Relais nacheinander schalten (Dienst vorher stoppen)")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
+    if args.setup:
+        return cmd_setup(args.config)
     if args.list:
-        return cmd_list(fb.DEFAULT_PIDS)
+        try:
+            pids = Config(args.config).pids
+        except ConfigError:
+            pids = fb.DEFAULT_PIDS
+        return cmd_list(pids)
     try:
         cfg = Config(args.config)
     except ConfigError as err:
@@ -422,6 +601,11 @@ def main():
                         format="%(levelname)s %(name)s: %(message)s")
     if args.test:
         return cmd_test(cfg)
+    if not cfg.serial:
+        log.error("serial= ist leer. Ohne Seriennummer koennte der Dienst ein anderes "
+                  "FTDI-Geraet (z. B. VE.Direct-Kabel) erwischen. Mit --list ablesen.")
+        time.sleep(300)
+        return 1
     run_service(cfg)
     return 0
 
