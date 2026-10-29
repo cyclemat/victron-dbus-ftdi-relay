@@ -1,0 +1,4 @@
+#!/bin/sh
+exec 2>&1
+cd /data/dbus-ftdi-relay
+exec python3 -u /data/dbus-ftdi-relay/dbus_ftdi_relay.py
