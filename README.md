@@ -1,5 +1,7 @@
+<p align="center">
+  <img src="dbus-Relais-Banner.png" alt="8-Kanal-USB-Relaisboard mit FTDI-Chip" width="100%">
+</p>
 
-<img src="dbus-Relais-Banner.png" alt="8-Kanal-USB-Relaisboard mit FTDI-Chip" width="400">
 In Testing
 # dbus-ftdi-relay
 
