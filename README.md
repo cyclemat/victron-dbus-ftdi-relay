@@ -1,5 +1,6 @@
-In Testing
+
 <img src="dbus-Relais-Banner.png" alt="8-Kanal-USB-Relaisboard mit FTDI-Chip" width="400">
+In Testing
 # dbus-ftdi-relay
 
 8-Kanal-USB-Relaisboard mit FTDI-Chip (FT245RL/FT232RL + ULN2803) als Schalter in Venus OS. Die Relais erscheinen in der Schalter-Ansicht der neuen Oberfläche (gui-v2) und sind über D-Bus, MQTT und Node-RED schaltbar.
